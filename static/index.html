@@ -1,0 +1,454 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+    <title>S.Y.N.T.H | Neural Interface V4</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+
+    <link
+      href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css"
+      rel="stylesheet"
+    />
+
+    <link rel="stylesheet" href="/static/styles.css" />
+
+    <script>
+      const saved = localStorage.getItem("theme") || "dark";
+      document.documentElement.setAttribute("data-theme", saved);
+    </script>
+  </head>
+  <body>
+    <div id="toast-container" class="toast-container"></div>
+
+    <div class="ambient-bg">
+      <div class="grid-overlay"></div>
+      <div class="glow-orb orb-1"></div>
+      <div class="glow-orb orb-2"></div>
+    </div>
+
+    <div class="shell">
+      <nav class="nav-rail">
+        <div class="brand-mark">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path>
+          </svg>
+        </div>
+
+        <div class="nav-group">
+          <button class="nav-icon active" id="desk-chat-btn" title="Neural Link">
+            <i class="ri-bubble-chart-line"></i>
+          </button>
+          <button class="nav-icon" id="desk-settings-btn" title="System Core">
+            <i class="ri-cpu-line"></i>
+          </button>
+          <button class="nav-icon" id="desk-docs-btn" title="API Docs">
+            <i class="ri-book-open-line"></i>
+          </button>
+          <button class="nav-icon" id="desk-db-btn" title="Database">
+            <i class="ri-database-2-line"></i>
+          </button>
+        </div>
+
+        <div class="nav-bottom">
+          <button id="theme-toggle" class="nav-icon" title="Toggle Theme">
+            <i class="ri-moon-clear-line"></i>
+          </button>
+          <div id="status" class="status-beacon disconnected" title="System Offline"></div>
+        </div>
+      </nav>
+
+      <div class="viewport">
+        <main class="stage active-view" id="view-chat">
+          <header class="hud-header">
+            <div class="hud-left">
+              <div class="input-group">
+                <i class="ri-smartphone-line"></i>
+                <input id="phone-number" type="tel" placeholder="Target Phone..." autocomplete="off" />
+              </div>
+            </div>
+
+            <div class="hud-center">
+              <div class="session-pill">
+                <span class="pulse-dot"></span>
+                <span id="session-id">NO SESSION</span>
+              </div>
+            </div>
+
+            <div class="hud-right">
+              <span id="lang-pill" class="badge">--</span>
+              <span id="transport-pill" class="badge">REST</span>
+              <span id="flow-pill" class="badge">IDLE</span>
+            </div>
+          </header>
+
+          <div class="stream-container" id="stream-container">
+            <div class="stream-log" id="chat-log">
+              <div class="system-node">
+                <div class="node-icon"><i class="ri-command-line"></i></div>
+                <div class="node-content">
+                  <h3>System Ready</h3>
+                  <p>Awaiting input coordinates.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="command-deck">
+            <div class="command-bar">
+              <input id="call-uuid" type="hidden" />
+              <textarea id="message" placeholder="Transmit command..." rows="1"></textarea>
+              <div class="command-actions">
+                <button id="reset" class="action-btn secondary" title="Purge Log">
+                  <i class="ri-delete-bin-7-line"></i>
+                </button>
+                <button id="send" class="action-btn primary" title="Transmit">
+                  <i class="ri-send-plane-fill"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </main>
+
+        <main class="stage view-hidden" id="view-settings">
+          <header class="view-header">
+            <div>
+              <h2>Settings</h2>
+              <p>System prompts, macros, and telemetry.</p>
+            </div>
+          </header>
+
+          <div class="view-body">
+            <section class="panel-card">
+              <h4 class="glitch-header">SYSTEM PROMPT</h4>
+              <div class="cyber-select">
+                <select id="prompt-select"></select>
+                <i class="ri-arrow-down-s-line"></i>
+              </div>
+              <div class="code-editor-wrapper">
+                <textarea id="prompt-editor" spellcheck="false"></textarea>
+                <button id="save-prompts" class="save-trigger">UPDATE CORE</button>
+              </div>
+            </section>
+
+            <section class="panel-card">
+              <h4 class="glitch-header">QUICK PROTOCOLS</h4>
+              <div class="macro-grid">
+                <button class="macro-chip" data-message="समय क्या है?">
+                  <i class="ri-time-line"></i> Time Check
+                </button>
+                <button class="macro-chip" data-message="कैलेंडर दिखाओ">
+                  <i class="ri-calendar-line"></i> Events
+                </button>
+                <button class="macro-chip" data-message="Nearest hospital">
+                  <i class="ri-hospital-line"></i> Med-Evac
+                </button>
+                <button class="macro-chip" data-message="/claim">
+                  <i class="ri-shield-flash-line"></i> Init Claim
+                </button>
+                <button class="macro-chip danger" data-message="/cancel">
+                  <i class="ri-close-circle-fill"></i> Abort
+                </button>
+              </div>
+            </section>
+
+            <section class="panel-card">
+              <h4 class="glitch-header">TELEMETRY</h4>
+              <div class="terminal-window">
+                <pre id="config-box">Fetching...</pre>
+              </div>
+            </section>
+          </div>
+        </main>
+
+        <main class="stage view-hidden" id="view-docs">
+          <header class="view-header">
+            <div>
+              <h2>API Docs</h2>
+              <p>Integration guides, endpoints, and payload examples.</p>
+            </div>
+          </header>
+
+          <div class="view-body">
+            <section class="panel-card span-2">
+              <h4 class="glitch-header">BASE URL</h4>
+              <div class="doc-block">
+                <div class="doc-label">Base URL</div>
+                <pre>http://&lt;host&gt;:9019</pre>
+              </div>
+            </section>
+
+            <section class="panel-card span-2">
+              <h4 class="glitch-header">ENDPOINTS</h4>
+              <div class="doc-block">
+                <div class="doc-label">Core</div>
+                <ul class="doc-list">
+                  <li>GET /health</li>
+                  <li>GET /config</li>
+                  <li>GET /system</li>
+                  <li>POST /system</li>
+                  <li>POST /chat</li>
+                  <li>WS /ws</li>
+                  <li>DB CRUD endpoints under /db</li>
+                </ul>
+              </div>
+            </section>
+
+            <section class="panel-card span-2">
+              <h4 class="glitch-header">POST /chat</h4>
+              <div class="doc-block">
+                <div class="doc-label">Required fields</div>
+                <pre>{
+  "message": "Hello",
+  "phone_number": "9999999999",
+  "call_uuid": "abc-123",
+  "system_prompt_id": "core-multi",
+  "reset": false
+}</pre>
+              </div>
+              <div class="doc-block">
+                <div class="doc-label">cURL</div>
+                <pre>curl -X POST http://&lt;host&gt;:9019/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"message\":\"Hello\",\"phone_number\":\"9999999999\",\"call_uuid\":\"abc-123\"}"</pre>
+              </div>
+              <div class="doc-block">
+                <div class="doc-label">JavaScript</div>
+                <pre>const res = await fetch("http://&lt;host&gt;:9019/chat", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    message: "Hello",
+    phone_number: "9999999999",
+    call_uuid: "abc-123"
+  })
+});
+const data = await res.json();</pre>
+              </div>
+              <div class="doc-block">
+                <div class="doc-label">Python</div>
+                <pre>import requests
+
+payload = {
+  "message": "Hello",
+  "phone_number": "9999999999",
+  "call_uuid": "abc-123"
+}
+res = requests.post("http://&lt;host&gt;:9019/chat", json=payload)
+data = res.json()</pre>
+              </div>
+            </section>
+
+            <section class="panel-card span-2">
+              <h4 class="glitch-header">WEBSOCKET /ws (REALTIME INTEGRATION)</h4>
+              <div class="doc-block">
+                <div class="doc-label">Quick Start (JS)</div>
+                <pre>const ws = new WebSocket("ws://&lt;host&gt;:9019/ws");
+ws.onopen = () =&gt; ws.send(JSON.stringify({
+  message: "Hello",
+  phone_number: "9999999999",
+  call_uuid: "abc-123"
+}));
+ws.onmessage = (event) =&gt; {
+  const msg = JSON.parse(event.data);
+  if (msg.type === "chat") console.log(msg.reply);
+};</pre>
+              </div>
+              <div class="doc-block">
+                <div class="doc-label">Payload (same as /chat)</div>
+                <pre>{
+  "message": "Hello",
+  "phone_number": "9999999999",
+  "call_uuid": "abc-123",
+  "system_prompt_id": "core-multi",
+  "reset": false
+}</pre>
+              </div>
+              <div class="doc-block">
+                <div class="doc-label">Message Types</div>
+                <pre>{
+  "type": "chat",
+  "reply": "...",
+  "language": "hi",
+  "intent": "chat",
+  "flow_state": null
+}
+
+{
+  "type": "error",
+  "detail": "..."
+}</pre>
+              </div>
+              <div class="doc-block">
+                <div class="doc-label">Python (websockets)</div>
+                <pre>import asyncio
+import json
+import websockets
+
+async def main():
+    async with websockets.connect("ws://&lt;host&gt;:9019/ws") as ws:
+        await ws.send(json.dumps({
+            "message": "Hello",
+            "phone_number": "9999999999",
+            "call_uuid": "abc-123"
+        }))
+        data = json.loads(await ws.recv())
+        print(data)
+
+asyncio.run(main())</pre>
+              </div>
+            </section>
+
+            <section class="panel-card span-2">
+              <h4 class="glitch-header">WEBSOCKET INTEGRATION (UI + REST FALLBACK)</h4>
+              <div class="doc-block">
+                <div class="doc-label">Frontend (WS + REST fallback)</div>
+                <pre>async function sendChat(payload) {
+  if (!window.WebSocket) return fetchChat(payload);
+  return new Promise((resolve, reject) =&gt; {
+    const ws = new WebSocket("ws://&lt;host&gt;:9019/ws");
+    ws.onopen = () =&gt; ws.send(JSON.stringify(payload));
+    ws.onmessage = (evt) =&gt; {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === "chat") resolve(msg);
+      else reject(msg);
+      ws.close();
+    };
+    ws.onerror = () =&gt; fetchChat(payload).then(resolve).catch(reject);
+  });
+}
+
+async function fetchChat(payload) {
+  const res = await fetch("http://&lt;host&gt;:9019/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  return res.json();
+}</pre>
+              </div>
+              <div class="doc-block">
+                <div class="doc-label">Notes</div>
+                <ul class="doc-list">
+                  <li>Use wss:// when running behind HTTPS.</li>
+                  <li>Keep the same call_uuid for a session.</li>
+                  <li>The UI uses WebSocket by default and falls back to REST.</li>
+                </ul>
+              </div>
+            </section>
+          </div>
+        </main>
+
+        <main class="stage view-hidden" id="view-db">
+          <header class="view-header">
+            <div>
+              <h2>Database</h2>
+              <p>Browse tables, filter rows, and perform CRUD actions.</p>
+            </div>
+          </header>
+
+          <div class="view-body">
+            <section class="panel-card db-control">
+              <h4 class="glitch-header">TABLE CONTROL</h4>
+              <div class="db-control-row">
+                <div class="cyber-select flex-grow">
+                  <select id="db-table-select"></select>
+                  <i class="ri-database-2-line"></i>
+                </div>
+                <button id="db-refresh" class="action-btn secondary" title="Refresh Tables">
+                  <i class="ri-refresh-line"></i>
+                </button>
+              </div>
+              <div class="db-actions">
+                <button id="db-load" class="save-trigger">LOAD ROWS</button>
+                <button id="db-columns" class="save-trigger ghost-btn">COLUMNS</button>
+              </div>
+              <div class="db-filter-row">
+                <div class="input-group flex-grow">
+                  <i class="ri-search-line"></i>
+                  <input id="db-filter" type="text" placeholder="Filter rows..." />
+                </div>
+                <div class="cyber-select">
+                  <select id="db-page-size">
+                    <option value="10">10</option>
+                    <option value="25">25</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                  </select>
+                  <i class="ri-expand-up-down-line"></i>
+                </div>
+              </div>
+              <div class="db-pagination">
+                <button id="db-prev" class="action-btn secondary" title="Prev">
+                  <i class="ri-arrow-left-line"></i>
+                </button>
+                <span id="db-page-info" class="badge">Page 1</span>
+                <button id="db-next" class="action-btn secondary" title="Next">
+                  <i class="ri-arrow-right-line"></i>
+                </button>
+              </div>
+            </section>
+
+
+            <section class="panel-card span-2 db-table-card">
+              <h4 class="glitch-header">DATA VIEW</h4>
+              <div class="table-wrap">
+                <table id="db-table" class="data-table">
+                  <thead></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel-card span-2 db-editor">
+              <h4 class="glitch-header">ROW EDITOR</h4>
+              <div class="editor-toolbar">
+                <div class="mode-toggle">
+                  <button id="db-mode-insert" class="chip active" type="button">Insert</button>
+                  <button id="db-mode-update" class="chip" type="button">Update</button>
+                </div>
+                <div class="match-row" id="db-match-row">
+                  <label for="db-match-column">Match column</label>
+                  <select id="db-match-column"></select>
+                  <input id="db-match-value" type="text" placeholder="Value" />
+                </div>
+              </div>
+              <div id="db-form" class="db-form-grid"></div>
+              <div class="editor-actions">
+                <button id="db-save" class="save-trigger" type="button">Save</button>
+                <button id="db-cancel" class="save-trigger ghost-btn" type="button">Cancel</button>
+              </div>
+            </section>
+            <pre id="db-output" class="db-output-sr">No data loaded.</pre>
+          </div>
+        </main>
+      </div>
+
+      <nav class="mobile-nav">
+        <button class="mob-btn active" data-target="view-chat">
+          <i class="ri-chat-3-line"></i>
+          <span>Chat</span>
+        </button>
+        <button class="mob-btn" data-target="view-settings">
+          <i class="ri-settings-4-line"></i>
+          <span>Settings</span>
+        </button>
+        <button class="mob-btn" data-target="view-docs">
+          <i class="ri-book-open-line"></i>
+          <span>Docs</span>
+        </button>
+        <button class="mob-btn" data-target="view-db">
+          <i class="ri-database-2-line"></i>
+          <span>DB</span>
+        </button>
+      </nav>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

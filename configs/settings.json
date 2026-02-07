@@ -1,0 +1,41 @@
+{
+  "default_language": "hi",
+  "default_system_prompt_id": "core-multi",
+  "timezone": "Asia/Kolkata",
+  "llm": {
+    "provider": "groq",
+    "model": "llama-3.1-8b-instant",
+    "base_url": ""
+  },
+  "llm_base_urls": {
+    "openai": "https://api.openai.com/v1/chat/completions",
+    "groq": "https://api.groq.com/openai/v1/chat/completions",
+    "ollama": "http://localhost:11434",
+    "claude": "https://api.anthropic.com/v1/messages"
+  },
+  "postgres": {
+    "user": "claim_user",
+    "password": "claim_pass",
+    "host": "192.168.13.235",
+    "port": 5444,
+    "db": "claim_db1"
+  },
+  "data_paths": {
+    "hospitals_xlsx": "data/hospitals.xlsx",
+    "garages_xlsx": "data/garages.xlsx",
+    "faqs_dir": "data/faqs"
+  },
+  "logging": {
+    "dir": "logs",
+    "level": "INFO"
+  },
+  "telegram": {
+    "bot_token": "8491259370:AAE8uyriIa55_m_PBdNG-c_pyNV7lUmMQOw",
+    "chat_id": "",
+    "sms_enabled": false
+  },
+  "session": {
+    "expire_minutes": 6,
+    "summary_max_chars": 1000
+  }
+}
