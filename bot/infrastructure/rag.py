@@ -8,6 +8,7 @@ import re
 from pypdf import PdfReader
 
 from .config import SETTINGS
+from bot.shared.translator import translate_to_english
 
 log = logging.getLogger("rag")
 
@@ -78,14 +79,15 @@ class FAQRetriever:
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:
-        tokens = re.findall(r"[\\w]+", text.lower())
+        tokens = re.findall(r"[\w]+", text.lower())
         return {t for t in tokens if t and len(t) > 1}
 
     def query(self, question: str, top_k: int = 3) -> list[dict[str, Any]]:
         self.load()
         if not self.chunks:
             return []
-        query_tokens = self._tokenize(question)
+        normalized_question = translate_to_english(question)
+        query_tokens = self._tokenize(normalized_question)
         if not query_tokens:
             return []
 

@@ -11,9 +11,9 @@ from bot.application.flows import (
     extract_policy_choice,
     _invalid_pincode,
 )
-from bot.application.orchestrator import StepResponseAgent, YesNoAgent
+from bot.application.orchestrator import FlowStartAgent, IntentAgent, StepResponseAgent, YesNoAgent
 from bot.infrastructure.config import SETTINGS
-from bot.shared.datetime_parser import ParsedDateTime
+from bot.shared.datetime_parser import ParsedDateTime, parse_natural_datetime
 from bot.shared.i18n import get_message
 from bot.shared.memory import SessionStore
 
@@ -110,6 +110,49 @@ def test_claim_date_validation_invalid(monkeypatch):
     outcome = asyncio.run(run())
     assert outcome.flow_state["step"] == "incident_date"
     assert get_message("claim_invalid_date", "en") in outcome.reply
+
+
+def test_claim_date_llm_fallback_for_telugu(monkeypatch):
+    tz = ZoneInfo(SETTINGS.timezone)
+
+    async def llm_date(text, language, now):
+        assert language == "te"
+        return ParsedDateTime(value=datetime(2026, 2, 8, 15, 0, 0, tzinfo=tz), had_time=True)
+
+    monkeypatch.setattr("bot.application.flows.parse_natural_datetime", lambda text, now=None: None)
+    flow = ClaimFlow(datetime_parser=llm_date)
+    session = _make_session(call_uuid="claim-date-llm-te")
+    flow_state = {"name": "claim", "step": "incident_date", "data": {"policy_number": "POL-501"}}
+
+    async def run():
+        return await flow.handle(flow_state, session, "నిన్న మధ్యాహ్నం", "te")
+
+    outcome = asyncio.run(run())
+    assert outcome.flow_state["step"] == "location"
+    assert outcome.flow_state["data"]["incident_date"] == "2026-02-08"
+    assert get_message("claim_prompt_location", "te") in outcome.reply
+
+
+def test_parse_natural_datetime_day_first_month_name_with_time():
+    now = datetime(2026, 2, 8, 22, 30, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    parsed = parse_natural_datetime("8 feb 2026 10:00 am", now=now)
+    assert parsed is not None
+    assert parsed.value.year == 2026
+    assert parsed.value.month == 2
+    assert parsed.value.day == 8
+    assert parsed.value.hour == 10
+    assert parsed.value.minute == 0
+
+
+def test_parse_natural_datetime_month_first_date_not_split_from_year():
+    now = datetime(2026, 2, 8, 22, 30, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    parsed = parse_natural_datetime("feb 9, 2026 10:00 am", now=now)
+    assert parsed is not None
+    assert parsed.value.year == 2026
+    assert parsed.value.month == 2
+    assert parsed.value.day == 9
+    assert parsed.value.hour == 10
+    assert parsed.value.minute == 0
 
 
 def test_pincode_length_validation():
@@ -450,7 +493,7 @@ def test_accident_start_skips_safe_when_medical_requested(monkeypatch):
             yes_no_classifier=yes_medical,
             location_extractor=extract_location,
         )
-        return await agent.handle("i had an accident need medical assistance", session, "en")
+        return await agent.handle("i had an accident need medical assistance near kphb", session, "en")
 
     outcome = asyncio.run(run())
     assert "Nearest hospital" in outcome.reply
@@ -484,7 +527,7 @@ def test_accident_start_plain_accident_does_not_skip_to_medical():
     assert get_message("accident_safe_prompt", "en") in outcome.reply
 
 
-def test_out_of_scope_message_in_flow_returns_guardrail_scope():
+def test_out_of_scope_message_in_yes_no_step_reprompts_step():
     async def intent_chat(message, language):
         return "chat"
 
@@ -500,9 +543,77 @@ def test_out_of_scope_message_in_flow_returns_guardrail_scope():
         return await agent.handle("can you make pani puri", session, "en")
 
     outcome = asyncio.run(run())
-    assert outcome.intent == "guardrail_scope"
-    assert get_message("guardrail_scope", "en") in outcome.reply
+    assert outcome.intent == "accident_step"
     assert get_message("accident_drivable_prompt", "en") in outcome.reply
+
+
+def test_claim_damage_free_text_not_blocked_by_guardrail():
+    async def intent_chat(message, language):
+        return "chat"
+
+    async def flow_none(message, language):
+        return "none"
+
+    async def unknown_yes_no(*args, **kwargs):
+        return None
+
+    async def response_no(*args, **kwargs):
+        return False
+
+    session = _make_session(call_uuid="claim-damage-free-text")
+    session.profile_loaded = True
+    session.flow = {"name": "claim", "step": "damage_type", "data": {}}
+
+    async def run():
+        agent = FlowAgent(
+            intent_classifier=intent_chat,
+            flow_classifier=flow_none,
+            yes_no_classifier=unknown_yes_no,
+            response_matcher=response_no,
+        )
+        return await agent.handle("full front part of car", session, "en")
+
+    outcome = asyncio.run(run())
+    assert outcome.intent == "claim_step"
+    assert outcome.flow_state["name"] == "claim"
+    assert outcome.flow_state["step"] == "description"
+    assert get_message("claim_prompt_description", "en") in outcome.reply
+    assert get_message("guardrail_scope", "en") not in outcome.reply
+
+
+def test_claim_damage_free_text_not_detoured_by_flow_hint():
+    async def intent_chat(message, language):
+        return "chat"
+
+    async def flow_accident(message, language):
+        return "accident"
+
+    async def unknown_yes_no(*args, **kwargs):
+        return None
+
+    async def response_no(*args, **kwargs):
+        return False
+
+    session = _make_session(call_uuid="claim-damage-no-detour")
+    session.profile_loaded = True
+    session.flow = {"name": "claim", "step": "damage_type", "data": {}}
+
+    async def run():
+        agent = FlowAgent(
+            intent_classifier=intent_chat,
+            flow_classifier=flow_accident,
+            yes_no_classifier=unknown_yes_no,
+            response_matcher=response_no,
+        )
+        return await agent.handle("full front part of car", session, "en")
+
+    outcome = asyncio.run(run())
+    assert outcome.intent == "claim_step"
+    assert outcome.flow_state["name"] == "claim"
+    assert outcome.flow_state["step"] == "description"
+    assert get_message("claim_prompt_description", "en") in outcome.reply
+    assert get_message("guardrail_scope", "en") not in outcome.reply
+    assert get_message("accident_empathy", "en") not in outcome.reply
 
 
 def test_drivable_descriptive_response_does_not_trigger_guardrail():
@@ -882,6 +993,101 @@ def test_rsa_location_does_not_detour_to_hospital_without_explicit_intent(monkey
     assert "hospital" not in outcome.reply.lower()
 
 
+def test_accident_safe_injury_message_not_hijacked_by_hallucinated_location():
+    async def intent_hospital_search(message, language):
+        return "hospital_search"
+
+    async def hallucinated_location(message, language):
+        return "Karkhana"
+
+    async def safe_is_no(message, context, language):
+        return False if context == "safe" else None
+
+    session = _make_session(call_uuid="safe-hallucinated-location")
+    session.profile_loaded = True
+    session.flow = {"name": "accident", "step": "safe", "data": {}}
+
+    async def run():
+        agent = FlowAgent(
+            intent_classifier=intent_hospital_search,
+            location_extractor=hallucinated_location,
+            yes_no_classifier=safe_is_no,
+        )
+        return await agent.handle("my leg is broken", session, "en")
+
+    outcome = asyncio.run(run())
+    assert outcome.intent == "accident_step"
+    assert outcome.flow_state["step"] == "medical"
+    assert get_message("accident_medical_prompt", "en") in outcome.reply
+    assert "Nearest hospital" not in outcome.reply
+
+
+def test_explicit_hospital_detour_without_location_asks_for_location():
+    async def intent_chat(message, language):
+        return "chat"
+
+    async def route_hospital(message, language):
+        return "hospital"
+
+    async def no_location(message, language):
+        return None
+
+    async def response_relevant(*args, **kwargs):
+        return True
+
+    session = _make_session(call_uuid="hospital-detour-no-location")
+    session.profile_loaded = True
+    session.flow = {"name": "accident", "step": "drivable", "data": {}}
+
+    async def run():
+        agent = FlowAgent(
+            intent_classifier=intent_chat,
+            flow_classifier=route_hospital,
+            location_extractor=no_location,
+            response_matcher=response_relevant,
+        )
+        return await agent.handle("find me a hospital", session, "en")
+
+    outcome = asyncio.run(run())
+    assert outcome.intent == "flow_detour"
+    assert get_message("hospital_prompt_location", "en") in outcome.reply
+    assert get_message("accident_drivable_prompt", "en") in outcome.reply
+    assert "Nearest hospital" not in outcome.reply
+
+
+def test_roadside_request_not_hijacked_to_hospital_followup():
+    async def intent_chat(message, language):
+        return "chat"
+
+    async def route_roadside(message, language):
+        return "roadside"
+
+    async def no_location(message, language):
+        return None
+
+    async def response_relevant(*args, **kwargs):
+        return True
+
+    session = _make_session(call_uuid="roadside-not-hospital")
+    session.profile_loaded = True
+    session.flow = {"name": "accident", "step": "drivable", "data": {}}
+    session.last_service = "hospital"
+    session.last_location_query = "kphb"
+
+    async def run():
+        agent = FlowAgent(
+            intent_classifier=intent_chat,
+            flow_classifier=route_roadside,
+            location_extractor=no_location,
+            response_matcher=response_relevant,
+        )
+        return await agent.handle("find me road side assistance", session, "en")
+
+    outcome = asyncio.run(run())
+    assert "Nearest hospital" not in outcome.reply
+    assert get_message("accident_drivable_prompt", "en") in outcome.reply
+
+
 def test_yes_no_agent_unknown_not_treated_as_no(monkeypatch):
     class _FakeResponse:
         def __init__(self, content: str):
@@ -941,6 +1147,39 @@ def test_accident_safe_semantic_no_does_not_trigger_guardrail():
     assert get_message("guardrail_scope", "en") not in outcome.reply
 
 
+def test_accident_safe_semantic_fallback_advances_when_yesno_unknown():
+    async def intent_chat(message, language):
+        return "chat"
+
+    async def route_hospital(message, language):
+        return "hospital"
+
+    async def yes_no_unknown(message, context, language):
+        return None
+
+    async def response_not_relevant(message, prompt, language):
+        return False
+
+    session = _make_session(call_uuid="accident-safe-fallback")
+    session.profile_loaded = True
+    session.flow = {"name": "accident", "step": "safe", "data": {}}
+
+    async def run():
+        agent = FlowAgent(
+            intent_classifier=intent_chat,
+            flow_classifier=route_hospital,
+            yes_no_classifier=yes_no_unknown,
+            response_matcher=response_not_relevant,
+        )
+        return await agent.handle("we are injured", session, "en")
+
+    outcome = asyncio.run(run())
+    assert outcome.intent == "accident_step"
+    assert outcome.flow_state["step"] == "medical"
+    assert get_message("accident_medical_prompt", "en") in outcome.reply
+    assert get_message("guardrail_scope", "en") not in outcome.reply
+
+
 def test_rsa_location_raw_locality_not_blocked_when_response_unknown(monkeypatch):
     async def intent_chat(message, language):
         return "chat"
@@ -979,3 +1218,33 @@ def test_rsa_location_raw_locality_not_blocked_when_response_unknown(monkeypatch
     assert outcome.intent == "accident_step"
     assert "Arranged assistance" in outcome.reply
     assert get_message("guardrail_scope", "en") not in outcome.reply
+
+
+def test_intent_agent_label_parser_ignores_negated_substrings(monkeypatch):
+    class _FakeResponse:
+        def __init__(self, content: str):
+            self.content = content
+
+    class _FakeClient:
+        def generate(self, messages, system_prompt):
+            return _FakeResponse("chat (not claim_payment)")
+
+    monkeypatch.setattr("bot.application.orchestrator.build_client", lambda cfg: _FakeClient())
+    agent = IntentAgent(SETTINGS)
+    result = asyncio.run(agent.classify("i had an accident", "en"))
+    assert result == "chat"
+
+
+def test_flow_start_agent_label_parser_ignores_extra_text(monkeypatch):
+    class _FakeResponse:
+        def __init__(self, content: str):
+            self.content = content
+
+    class _FakeClient:
+        def generate(self, messages, system_prompt):
+            return _FakeResponse("none (do not start any flow)")
+
+    monkeypatch.setattr("bot.application.orchestrator.build_client", lambda cfg: _FakeClient())
+    agent = FlowStartAgent(SETTINGS)
+    result = asyncio.run(agent.classify("when will claim payment be processed", "en"))
+    assert result == "none"

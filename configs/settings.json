@@ -4,8 +4,9 @@
   "timezone": "Asia/Kolkata",
   "llm": {
     "provider": "groq",
-    "model": "llama-3.1-8b-instant",
-    "base_url": ""
+    "model": "llama-3.3-70b-versatile",
+    "base_url": "",
+    "api_key": ""
   },
   "llm_base_urls": {
     "openai": "https://api.openai.com/v1/chat/completions",
@@ -15,7 +16,7 @@
   },
   "postgres": {
     "user": "claim_user",
-    "password": "claim_pass",
+    "password": "",
     "host": "192.168.13.235",
     "port": 5444,
     "db": "claim_db1"
@@ -30,7 +31,7 @@
     "level": "INFO"
   },
   "telegram": {
-    "bot_token": "8491259370:AAE8uyriIa55_m_PBdNG-c_pyNV7lUmMQOw",
+    "bot_token": "",
     "chat_id": "",
     "sms_enabled": false
   },

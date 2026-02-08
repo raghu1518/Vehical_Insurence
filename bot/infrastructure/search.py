@@ -8,6 +8,7 @@ from typing import Any, Iterable
 from openpyxl import load_workbook
 
 from .config import SETTINGS
+from bot.shared.translator import translate_to_english
 
 log = logging.getLogger("search")
 PIN_RE = re.compile(r"\b\d{6}\b")
@@ -165,13 +166,15 @@ def _search(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
 
 def search_hospitals(query: str, limit: int = 3) -> list[dict[str, Any]]:
     rows = load_hospitals()
-    results = _search(rows, query)
+    search_query = translate_to_english(query)
+    results = _search(rows, search_query)
     return results[:limit]
 
 
 def search_garages(query: str, limit: int = 1) -> list[dict[str, Any]]:
     rows = load_garages()
-    results = _search(rows, query)
+    search_query = translate_to_english(query)
+    results = _search(rows, search_query)
     return results[:limit]
 
 

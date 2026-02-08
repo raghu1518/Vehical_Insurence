@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Any
 
 from bot.infrastructure.config import Settings
+from bot.shared.datetime_parser import ParsedDateTime
 from bot.shared.i18n import detect_language, get_message
 from bot.infrastructure.llm_clients import build_client, LLMError
 from bot.application.flows import FlowAgent
@@ -64,6 +67,17 @@ class IntentAgent:
     def __init__(self, settings: Settings) -> None:
         self.client = build_client(settings.llm)
 
+    def _extract_label(self, raw: str) -> str:
+        text = (raw or "").strip().lower()
+        if not text:
+            return "chat"
+        if text in self.INTENT_LABELS:
+            return text
+        for token in re.findall(r"[a-z_]+", text):
+            if token in self.INTENT_LABELS:
+                return token
+        return "chat"
+
     async def classify(self, message: str, language: str) -> str:
         prompt = (
             "You are an intent classifier for a multilingual support assistant.\n"
@@ -85,19 +99,10 @@ class IntentAgent:
                 [{"role": "user", "content": prompt}],
                 None,
             )
-            raw = response.content.strip().lower()
+            raw = response.content
         except LLMError:
             return "chat"
-
-        for label in self.INTENT_LABELS:
-            if raw == label:
-                return label
-
-        for label in self.INTENT_LABELS:
-            if label in raw:
-                return label
-
-        return "chat"
+        return self._extract_label(raw)
 
 
 class ToolAgent:
@@ -154,8 +159,13 @@ class YesNoAgent:
             "- rsa_consent/claim_consent/fir: YES means user agrees/provided; NO means user declines/not provided.\n"
             "Examples:\n"
             "- safe + 'we are injured' -> NO\n"
+            "- safe + 'my leg is broken' -> NO\n"
             "- medical + 'need ambulance' -> YES\n"
+            "- medical + 'of course' -> YES\n"
+            "- medical + 'yha' -> YES\n"
             "- drivable + 'wheel not moving' -> NO\n"
+            "- drivable + 'vehicle not starting' -> NO\n"
+            "- drivable + 'need roadside assistance' -> NO\n"
             "- drivable + 'car is drivable' -> YES\n"
             f"Context: {context}.\n"
             f"User message: {message}"
@@ -239,6 +249,57 @@ class LocationAgent:
             return None
         return raw
 
+
+class DateTimeAgent:
+    def __init__(self, settings: Settings):
+        self.client = build_client(settings.llm)
+
+    async def parse(self, message: str, language: str, now: datetime) -> ParsedDateTime | None:
+        prompt = (
+            "Extract the incident datetime from the user message.\n"
+            "Return ONLY one of:\n"
+            "1) JSON object: {\"datetime\":\"YYYY-MM-DDTHH:MM:SS\",\"had_time\":true|false}\n"
+            "2) NONE\n"
+            "Rules:\n"
+            "- Resolve relative expressions (e.g., yesterday, last night) using the provided reference datetime.\n"
+            "- If time is not explicitly present, use 00:00:00 and had_time=false.\n"
+            "- Do not add explanations.\n"
+            f"Reference datetime: {now.isoformat()}\n"
+            f"User language: {language}\n"
+            f"Message: {message}"
+        )
+        try:
+            response = await asyncio.to_thread(
+                self.client.generate,
+                [{"role": "user", "content": prompt}],
+                None,
+            )
+            raw = response.content.strip()
+        except LLMError:
+            return None
+        if not raw or raw.upper() == "NONE":
+            return None
+
+        payload_text = raw
+        if "{" in raw and "}" in raw:
+            payload_text = raw[raw.find("{") : raw.rfind("}") + 1]
+        try:
+            payload = json.loads(payload_text)
+        except Exception:
+            return None
+
+        value = str(payload.get("datetime", "")).strip()
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None and now.tzinfo is not None:
+            parsed = parsed.replace(tzinfo=now.tzinfo)
+        had_time = bool(payload.get("had_time", False))
+        return ParsedDateTime(value=parsed, had_time=had_time)
+
 class FaqAgent:
     def __init__(self) -> None:
         self.retriever = get_retriever()
@@ -268,6 +329,17 @@ class FlowStartAgent:
     def __init__(self, settings: Settings) -> None:
         self.client = build_client(settings.llm)
 
+    def _extract_label(self, raw: str) -> str:
+        text = (raw or "").strip().lower()
+        if not text:
+            return "none"
+        if text in self.LABELS:
+            return text
+        for token in re.findall(r"[a-z_]+", text):
+            if token in self.LABELS:
+                return token
+        return "none"
+
     async def classify(self, message: str, language: str) -> str | None:
         prompt = (
             "You are a flow router for an insurance support assistant.\n"
@@ -295,18 +367,10 @@ class FlowStartAgent:
                 [{"role": "user", "content": prompt}],
                 None,
             )
-            raw = response.content.strip().lower()
+            raw = response.content
         except LLMError:
             return None
-
-        if raw in self.LABELS:
-            return raw
-
-        for label in self.LABELS:
-            if label in raw:
-                return label
-
-        return "none"
+        return self._extract_label(raw)
 
 
 class CustomerTypeAgent:
@@ -385,6 +449,7 @@ class Orchestrator:
         self.customer_type_agent = CustomerTypeAgent(settings)
         self.buy_policy_agent = BuyPolicyAgent(settings)
         self.location_agent = LocationAgent(settings)
+        self.datetime_agent = DateTimeAgent(settings)
         self.flow_agent = FlowAgent(
             yes_no_classifier=self.yes_no_agent.classify,
             flow_classifier=self.flow_start_agent.classify,
@@ -393,6 +458,7 @@ class Orchestrator:
             intent_classifier=self.intent_agent.classify,
             location_extractor=self.location_agent.extract,
             response_matcher=self.step_response_agent.classify,
+            datetime_parser=self.datetime_agent.parse,
         )
         self.chat_agent = ChatAgent(settings)
         self.faq_agent = FaqAgent()

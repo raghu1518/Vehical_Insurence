@@ -289,11 +289,11 @@ _MONTH_PATTERN = "|".join(
     sorted((re.escape(name) for name in _MONTH_MAP.keys()), key=len, reverse=True)
 )
 _MONTH_FIRST_RE = re.compile(
-    rf"\b({_MONTH_PATTERN})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(\d{{2,4}}))?\b",
+    rf"\b({_MONTH_PATTERN})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s+(\d{{2,4}}))?\b",
     re.IGNORECASE,
 )
 _DAY_FIRST_RE = re.compile(
-    rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_PATTERN})\.?(?:,?\s*(\d{{2,4}}))?\b",
+    rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\b\s+({_MONTH_PATTERN})\.?(?:,?\s+(\d{{2,4}}))?\b",
     re.IGNORECASE,
 )
 _AGO_EN_RE = re.compile(
@@ -484,11 +484,13 @@ def _parse_explicit_date(text: str, now: datetime | None = None) -> date | None:
         except ValueError:
             return None
 
-    match = _MONTH_FIRST_RE.search(text)
+    # Parse day-first before month-first to avoid false positives like
+    # "8 feb 2026" being interpreted as "feb 20 26".
+    match = _DAY_FIRST_RE.search(text)
     if match:
-        month_key = _normalize_month_token(match.group(1))
+        day = int(match.group(1))
+        month_key = _normalize_month_token(match.group(2))
         month = _MONTH_MAP.get(month_key)
-        day = int(match.group(2))
         year = _parse_year(match.group(3), now)
         if month:
             try:
@@ -496,11 +498,11 @@ def _parse_explicit_date(text: str, now: datetime | None = None) -> date | None:
             except ValueError:
                 return None
 
-    match = _DAY_FIRST_RE.search(text)
+    match = _MONTH_FIRST_RE.search(text)
     if match:
-        day = int(match.group(1))
-        month_key = _normalize_month_token(match.group(2))
+        month_key = _normalize_month_token(match.group(1))
         month = _MONTH_MAP.get(month_key)
+        day = int(match.group(2))
         year = _parse_year(match.group(3), now)
         if month:
             try:

@@ -12,7 +12,7 @@ from typing import Any
 
 from bot.infrastructure.db import create_claim, fetch_user_policies
 from bot.infrastructure.config import SETTINGS
-from bot.shared.datetime_parser import parse_natural_datetime
+from bot.shared.datetime_parser import ParsedDateTime, parse_natural_datetime
 from bot.shared.i18n import get_message
 from bot.infrastructure.search import search_garages, search_hospitals
 from bot.infrastructure.sms import send_sms_async
@@ -45,6 +45,19 @@ LOCATION_ACK_VALUES = {
     "nope",
 }
 
+HOSPITAL_FOLLOWUP_VALUES = {
+    "other hospital",
+    "another hospital",
+    "other one",
+    "another one",
+    "one more hospital",
+    "find other one",
+    "find me other one",
+    "find other hospital",
+    "get me other hospital",
+    "otherone",
+}
+
 
 def _invalid_pincode(text: str) -> bool:
     raw = (text or "").strip()
@@ -72,6 +85,22 @@ def _looks_like_location_text(text: str) -> bool:
     if not re.search(r"[A-Za-z0-9]", raw):
         return False
     return True
+
+
+def _looks_like_hospital_followup_request(text: str) -> bool:
+    raw = (text or "").strip().lower()
+    if not raw:
+        return False
+    compact = re.sub(r"\s+", " ", raw)
+    if compact in HOSPITAL_FOLLOWUP_VALUES:
+        return True
+    if ("hospital" in compact or "hospial" in compact or "hospitl" in compact) and (
+        "other" in compact or "another" in compact or "next" in compact
+    ):
+        return True
+    if "other one" in compact or "another one" in compact or "otherone" in compact:
+        return True
+    return False
 
 
 @dataclass
@@ -626,11 +655,30 @@ class ClaimFlow:
         "रोक",
     ]
 
+    def __init__(self, datetime_parser=None) -> None:
+        self._datetime_parser = datetime_parser
+
     def should_cancel(self, message: str) -> bool:
         text = message.lower().strip()
         if text.startswith("/cancel"):
             return True
         return any(hint in text for hint in self.CANCEL_HINTS)
+
+    async def _parse_incident_datetime(
+        self,
+        text: str,
+        language: str,
+        now: datetime,
+    ) -> ParsedDateTime | None:
+        parsed = parse_natural_datetime(text, now=now)
+        if parsed:
+            return parsed
+        if not self._datetime_parser:
+            return None
+        try:
+            return await self._datetime_parser(text, language, now)
+        except Exception:
+            return None
 
     async def start(self, session: Any, language: str) -> FlowOutcome:
         data = {}
@@ -663,7 +711,7 @@ class ClaimFlow:
         if step == "incident_date":
             tz = ZoneInfo(SETTINGS.timezone)
             now = datetime.now(tz)
-            parsed_dt = parse_natural_datetime(text, now=now)
+            parsed_dt = await self._parse_incident_datetime(text, language, now)
             if not parsed_dt:
                 reply = get_message("claim_invalid_date", language)
                 reply = f"{reply}\n{get_message('claim_prompt_date', language)}"
@@ -756,8 +804,9 @@ class FlowAgent:
         intent_classifier=None,
         location_extractor=None,
         response_matcher=None,
+        datetime_parser=None,
     ) -> None:
-        self.claim_flow = ClaimFlow()
+        self.claim_flow = ClaimFlow(datetime_parser=datetime_parser)
         self.accident_flow = AccidentFlow(self.claim_flow)
         self.hospital_flow = HospitalFlow()
         self.roadside_flow = RoadsideFlow()
@@ -881,7 +930,18 @@ class FlowAgent:
         except Exception:
             return None
         value = (value or "").strip()
-        return value or None
+        if not value:
+            return None
+        # Accept explicit pincode extraction.
+        pin_match = PIN_RE.search(value)
+        if pin_match:
+            return pin_match.group(0)
+        # Reject hallucinated extractor outputs that do not appear in the user text.
+        msg_norm = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", (message or "").lower())).strip()
+        val_norm = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", value.lower())).strip()
+        if val_norm and val_norm in msg_norm:
+            return value
+        return None
 
     async def _llm_yes_no(self, message: str, context: str, language: str) -> bool | None:
         if not self._yes_no_classifier:
@@ -908,7 +968,7 @@ class FlowAgent:
             return None
 
 
-    async def _hospital_detour_query(self, message: str, session: Any, language: str) -> str:
+    async def _hospital_detour_query(self, message: str, session: Any, language: str) -> str | None:
         text = (message or "").strip()
         location = await self._extract_location(text, language)
         if location:
@@ -916,22 +976,34 @@ class FlowAgent:
         remembered = str(getattr(session, "last_location_query", "") or "").strip()
         if remembered:
             return remembered
-        return text
+        return None
 
-    async def _should_followup_hospital(self, message: str, session: Any, language: str) -> bool:
+    async def _should_followup_hospital(
+        self,
+        message: str,
+        session: Any,
+        language: str,
+        intent: str | None = None,
+    ) -> bool:
         if str(getattr(session, "last_service", "") or "").lower() != "hospital":
             return False
-        flow_choice = await self._detect_flow(message, language)
+        explicit_followup = _looks_like_hospital_followup_request(message)
+        if intent == "hospital_search":
+            return True
+        if intent in {"garage_search"}:
+            return False
         if session.flow:
             active_flow = str(session.flow.get("name", "") or "").strip().lower()
             active_step = str(session.flow.get("step", "") or "").strip().lower()
             # During RSA location collection, do not hijack into hospital unless explicitly requested.
             if active_flow == "accident" and active_step == "rsa_location":
-                return flow_choice == "hospital"
-        if flow_choice == "hospital":
+                return bool(explicit_followup or intent == "hospital_search")
+        if explicit_followup:
             return True
-        location = await self._extract_location(message, language)
-        return bool(location)
+        if intent is not None:
+            return False
+        flow_choice = await self._detect_flow(message, language)
+        return flow_choice == "hospital"
 
     def _resume_current_flow_reply(self, detour_reply: str, flow_state: dict[str, Any], language: str) -> str:
         prompt = self._flow_step_prompt(flow_state, language)
@@ -941,7 +1013,13 @@ class FlowAgent:
             return detour_reply
         return f"{detour_reply}\n{prompt}"
 
-    async def _handle_inflow_detour(self, message: str, session: Any, language: str) -> FlowOutcome | None:
+    async def _handle_inflow_detour(
+        self,
+        message: str,
+        session: Any,
+        language: str,
+        intent: str | None = None,
+    ) -> FlowOutcome | None:
         if not session.flow:
             return None
 
@@ -953,14 +1031,35 @@ class FlowAgent:
 
         flow_choice = await self._detect_flow(message, language)
 
+        # Keep accident triage deterministic: complete safe/medical first.
+        if current_flow == "accident" and current_step in {"safe", "medical"}:
+            return None
+        # Keep claim data-capture deterministic unless user explicitly requests a hospital/garage search.
+        if current_flow == "claim" and current_step in {
+            "incident_date",
+            "location",
+            "damage_type",
+            "description",
+            "fir_filed",
+            "fir_no",
+        }:
+            if intent not in {"hospital_search", "garage_search"}:
+                return None
+
         hospital_followup = False
         if current_flow == "accident" and current_step in {"safe", "medical", "hospital_location", "drivable", "rsa_consent", "claim_consent", "rsa_location"}:
             if str(getattr(session, "last_service", "") or "").lower() == "hospital":
-                if flow_choice == "hospital":
-                    hospital_followup = True
-                elif current_step != "rsa_location":
-                    location = await self._extract_location(message, language)
-                    hospital_followup = bool(location)
+                is_hospital_request = flow_choice == "hospital" or _looks_like_hospital_followup_request(message)
+                if current_step == "rsa_location":
+                    is_hospital_request = flow_choice == "hospital"
+                if is_hospital_request:
+                    if current_step in {"safe", "medical"}:
+                        location = await self._extract_location(message, language)
+                        hospital_followup = bool(location)
+                    elif current_step == "hospital_location":
+                        hospital_followup = False
+                    else:
+                        hospital_followup = True
 
         if hospital_followup:
             flow_choice = "hospital"
@@ -986,11 +1085,12 @@ class FlowAgent:
         detour: FlowOutcome | None = None
         if flow_choice == "hospital":
             query = await self._hospital_detour_query(message, session, language)
-            if query:
-                hospital_state = {"name": "hospital", "step": "location", "data": {}}
-                detour = await self.hospital_flow.handle(hospital_state, session, query, language)
-            else:
-                detour = await self.hospital_flow.start(language)
+            if not query:
+                hospital_prompt = get_message("hospital_prompt_location", language)
+                resumed = self._resume_current_flow_reply(hospital_prompt, flow_state, language)
+                return FlowOutcome(reply=resumed, flow_state=flow_state, intent="flow_detour")
+            hospital_state = {"name": "hospital", "step": "location", "data": {}}
+            detour = await self.hospital_flow.handle(hospital_state, session, query, language)
         elif flow_choice == "roadside":
             detour = await self.roadside_flow.start(session, language)
         elif flow_choice == "claim":
@@ -1249,30 +1349,40 @@ class FlowAgent:
                 is_location_step = step in location_steps or (
                     step == "location" and flow_name in {"hospital", "roadside", "claim"}
                 )
-                yes_no_decision = None
-                step_response_relevant = None
-                if step in yes_no_steps:
-                    context = "medical" if step == "medical" else step
-                    yes_no_decision = await self._llm_yes_no(message, context, language)
-                    prompt = self._flow_step_prompt(session.flow, language)
-                    step_response_relevant = await self._llm_is_response(message, prompt, language)
-                has_location = bool(location_hint)
-                if not has_location and is_location_step and PIN_RE.search(message or ""):
-                    has_location = True
-                if not has_location and is_location_step and _looks_like_location_text(message):
-                    prompt = self._flow_step_prompt(session.flow, language)
-                    relevant = await self._llm_is_response(message, prompt, language)
-                    if relevant is not False:
-                        has_location = True
-                if yes_no_decision is None and not has_location and step_response_relevant is not True:
-                    # Allow hospital follow-ups during an active flow.
-                    hospital_followup = await self._should_followup_hospital(message, session, language)
-                    if not hospital_followup:
-                        reply = get_message("guardrail_scope", language)
+                is_structured_step = step in yes_no_steps or is_location_step
+                if is_structured_step:
+                    yes_no_decision = None
+                    step_response_relevant = None
+                    if step in yes_no_steps:
+                        context = "medical" if step == "medical" else step
+                        yes_no_decision = await self._llm_yes_no(message, context, language)
                         prompt = self._flow_step_prompt(session.flow, language)
-                        if prompt:
-                            reply = f"{reply}\n{prompt}"
-                        return FlowOutcome(reply=reply, flow_state=session.flow, intent="guardrail_scope")
+                        step_response_relevant = await self._llm_is_response(message, prompt, language)
+                    has_location = bool(location_hint)
+                    if not has_location and is_location_step and PIN_RE.search(message or ""):
+                        has_location = True
+                    if not has_location and is_location_step and _looks_like_location_text(message):
+                        prompt = self._flow_step_prompt(session.flow, language)
+                        relevant = await self._llm_is_response(message, prompt, language)
+                        if relevant is not False:
+                            has_location = True
+                    should_scope_block = (
+                        is_location_step
+                        and yes_no_decision is None
+                        and not has_location
+                        and step_response_relevant is not True
+                    )
+                    if should_scope_block:
+                        # Allow hospital follow-ups during an active flow.
+                        hospital_followup = await self._should_followup_hospital(
+                            message, session, language, intent=intent
+                        )
+                        if not hospital_followup:
+                            reply = get_message("guardrail_scope", language)
+                            prompt = self._flow_step_prompt(session.flow, language)
+                            if prompt:
+                                reply = f"{reply}\n{prompt}"
+                            return FlowOutcome(reply=reply, flow_state=session.flow, intent="guardrail_scope")
             if session.flow.get("name") == "accident":
                 step = str(session.flow.get("step", "") or "").strip().lower()
                 if step in {"safe", "medical"} and location_hint and intent == "hospital_search":
@@ -1281,7 +1391,7 @@ class FlowAgent:
             interruption = await self._interrupt_with_tool_or_faq(message, session.flow, language)
             if interruption:
                 return interruption
-            detour = await self._handle_inflow_detour(message, session, language)
+            detour = await self._handle_inflow_detour(message, session, language, intent=intent)
             if detour:
                 return detour
 
@@ -1296,6 +1406,14 @@ class FlowAgent:
             if step in {"safe", "medical", "drivable", "rsa_consent", "claim_consent"}:
                 context = "medical" if step == "medical" else step
                 decision = await self._llm_yes_no(message, context, language)
+                if decision is None:
+                    flow_hint = await self._detect_flow(message, language)
+                    if step == "safe" and (intent == "hospital_search" or flow_hint in {"hospital", "roadside"}):
+                        decision = False
+                    elif step == "medical" and (intent == "hospital_search" or flow_hint == "hospital"):
+                        decision = True
+                    elif step == "drivable" and (intent in {"garage_search"} or flow_hint == "roadside"):
+                        decision = False
                 if decision is not None:
                     if step == "medical" and decision:
                         location = await self._extract_location(message, language)
@@ -1325,7 +1443,7 @@ class FlowAgent:
                     return resumed
             return onboarding_outcome
 
-        if await self._should_followup_hospital(message, session, language):
+        if await self._should_followup_hospital(message, session, language, intent=intent):
             followup_state = {"name": "hospital", "step": "location", "data": {}}
             followup_query = await self._hospital_detour_query(message, session, language)
             log.info("hospital_followup_resume query=%s message=%s", followup_query, message)

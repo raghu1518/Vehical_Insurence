@@ -23,6 +23,7 @@ class SessionState:
     caller_phone: str | None = None
     pending_flow: str | None = None
     last_service: str | None = None
+    last_location_query: str | None = None
     last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
