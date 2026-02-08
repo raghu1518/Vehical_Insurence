@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from bot.infrastructure.config import Settings
-from bot.shared.i18n import detect_language, get_message, matches_intent
+from bot.shared.i18n import detect_language, get_message
 from bot.infrastructure.llm_clients import build_client, LLMError
 from bot.application.flows import FlowAgent
 from bot.infrastructure.rag import get_retriever
 from bot.shared.translator import translate_text
-from bot.shared.system_prompts import select_prompt_for_language
-from bot.shared.guardrails import apply_guardrails
+from bot.shared.guardrails import apply_guardrails, is_prompt_disclosure_request
 from bot.shared.tools import (
     ToolResult,
     parse_add_event,
@@ -20,7 +20,6 @@ from bot.shared.tools import (
     tool_calendar_list,
     tool_calendar_remove,
     tool_claim_payment,
-    tool_faq,
     tool_greeting,
     tool_garage_search,
     tool_hospital_search,
@@ -49,6 +48,8 @@ class IntentAgent:
     INTENT_LABELS = [
         "greeting",
         "sendoff",
+        "no_more_help",
+        "help_options",
         "time",
         "hospital_search",
         "garage_search",
@@ -56,8 +57,8 @@ class IntentAgent:
         "calendar_list",
         "calendar_remove",
         "claim_payment",
-        "faq",
         "chat",
+        "faq",
     ]
 
     def __init__(self, settings: Settings) -> None:
@@ -68,6 +69,13 @@ class IntentAgent:
             "You are an intent classifier for a multilingual support assistant.\n"
             f"Return ONLY one label from: {', '.join(self.INTENT_LABELS)}.\n"
             "If the message is not clearly a tool request, return chat.\n"
+            "claim_payment is ONLY for questions about claim payment status/timeline/settlement.\n"
+            "If the user is reporting an accident, asking for hospital/ambulance, roadside/towing, or filing a claim, return chat.\n"
+            "Examples:\n"
+            "- \"I had an accident\" -> chat\n"
+            "- \"Need a hospital near KPHB\" -> hospital_search\n"
+            "- \"Tow truck needed\" -> roadside_search\n"
+            "- \"When will my claim payment be processed?\" -> claim_payment\n"
             f"User language: {language}.\n"
             f"Message: {message}"
         )
@@ -89,22 +97,6 @@ class IntentAgent:
             if label in raw:
                 return label
 
-        if "calendar" in raw:
-            return "calendar_list"
-        if "hospital" in raw:
-            return "hospital_search"
-        if "garage" in raw or "workshop" in raw:
-            return "garage_search"
-        if "time" in raw:
-            return "time"
-        if "claim" in raw and "payment" in raw:
-            return "claim_payment"
-        if "greet" in raw or "hello" in raw:
-            return "greeting"
-        if "bye" in raw or "goodbye" in raw:
-            return "sendoff"
-        if "faq" in raw:
-            return "faq"
         return "chat"
 
 
@@ -134,8 +126,6 @@ class ToolAgent:
             return tool_calendar_remove(title, language)
         if intent == "claim_payment":
             return tool_claim_payment(language)
-        if intent == "faq":
-            return tool_faq(message, language)
         return None
 
 
@@ -156,6 +146,17 @@ class YesNoAgent:
         prompt = (
             "You are a strict classifier. Decide if the user's response means YES or NO.\n"
             "Return only one token: YES, NO, or UNKNOWN.\n"
+            "Use meaning, not keyword overlap.\n"
+            "Context rules:\n"
+            "- safe: YES means everyone is safe; NO means unsafe/injured.\n"
+            "- medical: YES means medical help is needed; NO means not needed.\n"
+            "- drivable: YES means vehicle can be driven; NO means cannot move/start.\n"
+            "- rsa_consent/claim_consent/fir: YES means user agrees/provided; NO means user declines/not provided.\n"
+            "Examples:\n"
+            "- safe + 'we are injured' -> NO\n"
+            "- medical + 'need ambulance' -> YES\n"
+            "- drivable + 'wheel not moving' -> NO\n"
+            "- drivable + 'car is drivable' -> YES\n"
             f"Context: {context}.\n"
             f"User message: {message}"
         )
@@ -166,11 +167,77 @@ class YesNoAgent:
         except LLMError:
             return None
         text = response.content.strip().upper()
-        if "YES" in text:
-            return True
-        if "NO" in text:
-            return False
+        for token in re.findall(r"[A-Z]+", text):
+            if token == "YES":
+                return True
+            if token == "NO":
+                return False
+            if token == "UNKNOWN":
+                return None
         return None
+
+
+class StepResponseAgent:
+    def __init__(self, settings: Settings):
+        self.client = build_client(settings.llm)
+
+    async def classify(self, message: str, prompt: str, language: str) -> bool | None:
+        if not prompt:
+            return None
+        query = (
+            "You are a response relevance classifier.\n"
+            "Determine if the user's message is answering the question.\n"
+            "Return ONLY YES, NO, or UNKNOWN.\n"
+            "Use meaning, not keyword overlap.\n"
+            "If the question expects a yes/no answer and the user gives a short affirmation/negation"
+            " (e.g., yes/no/yeah/yha/haan/nah), return YES.\n"
+            "If the user gives a semantic answer to a yes/no question, return YES.\n"
+            "Examples:\n"
+            "- Question: 'Is everyone safe?' User: 'we are injured' -> YES\n"
+            "- Question: 'Is your vehicle drivable?' User: 'wheel not moving' -> YES\n"
+            f"Question: {prompt}\n"
+            f"User message: {message}"
+        )
+        try:
+            response = await asyncio.to_thread(
+                self.client.generate, [{"role": "user", "content": query}], None
+            )
+        except LLMError:
+            return None
+        text = response.content.strip().upper()
+        for token in re.findall(r"[A-Z]+", text):
+            if token == "YES":
+                return True
+            if token == "NO":
+                return False
+            if token == "UNKNOWN":
+                return None
+        return None
+
+
+class LocationAgent:
+    def __init__(self, settings: Settings):
+        self.client = build_client(settings.llm)
+
+    async def extract(self, message: str, language: str) -> str | None:
+        prompt = (
+            "Extract the location, locality, or pincode from the user message.\n"
+            "Return ONLY the location string. If no location is present, return NONE.\n"
+            f"User language: {language}\n"
+            f"Message: {message}"
+        )
+        try:
+            response = await asyncio.to_thread(
+                self.client.generate, [{"role": "user", "content": prompt}], None
+            )
+        except LLMError:
+            return None
+        raw = response.content.strip()
+        if not raw:
+            return None
+        if raw.strip().upper() == "NONE":
+            return None
+        return raw
 
 class FaqAgent:
     def __init__(self) -> None:
@@ -207,11 +274,18 @@ class FlowStartAgent:
             f"Return ONLY one label from: {', '.join(self.LABELS)}.\n"
             "Use the user's meaning, not keywords.\n"
             "Pick:\n"
-            "- accident: user mentions an accident/crash/collision\n"
-            "- hospital: user needs medical help or hospital/ambulance\n"
+            "- accident: user mentions an accident/crash/collision (even if they also ask for a hospital)\n"
+            "- hospital: user needs medical help or hospital/ambulance and does NOT mention an accident\n"
             "- roadside: vehicle breakdown, towing, puncture, battery, pickup\n"
             "- claim: wants to file or continue a claim\n"
             "- none: general chat or unclear\n"
+            "Examples:\n"
+            "- \"I had an accident and need a hospital\" -> accident\n"
+            "- \"I had an accident\" -> accident\n"
+            "- \"Need a hospital near KPHB\" -> hospital\n"
+            "- \"My car broke down, need towing\" -> roadside\n"
+            "- \"I want to file a claim\" -> claim\n"
+            "- \"When will my claim payment be processed?\" -> none\n"
             f"User language: {language}\n"
             f"Message: {message}"
         )
@@ -306,14 +380,19 @@ class Orchestrator:
         self.intent_agent = IntentAgent(settings)
         self.tool_agent = ToolAgent()
         self.yes_no_agent = YesNoAgent(settings)
+        self.step_response_agent = StepResponseAgent(settings)
         self.flow_start_agent = FlowStartAgent(settings)
         self.customer_type_agent = CustomerTypeAgent(settings)
         self.buy_policy_agent = BuyPolicyAgent(settings)
+        self.location_agent = LocationAgent(settings)
         self.flow_agent = FlowAgent(
             yes_no_classifier=self.yes_no_agent.classify,
             flow_classifier=self.flow_start_agent.classify,
             customer_type_classifier=self.customer_type_agent.classify,
             buy_policy_classifier=self.buy_policy_agent.classify,
+            intent_classifier=self.intent_agent.classify,
+            location_extractor=self.location_agent.extract,
+            response_matcher=self.step_response_agent.classify,
         )
         self.chat_agent = ChatAgent(settings)
         self.faq_agent = FaqAgent()
@@ -325,6 +404,18 @@ class Orchestrator:
         prompts: list[dict],
     ) -> AgentResult:
         language = self.language_agent.detect(message, session.language, self.settings.default_language)
+
+        if is_prompt_disclosure_request(message):
+            return AgentResult(
+                reply=get_message("guardrail_prompt", language),
+                language=language,
+                intent="guardrail_prompt",
+                used_tool=None,
+                tool_data=None,
+                flow_state=None,
+                chat_ended=False,
+            )
+
         flow_outcome = await self.flow_agent.handle(message, session, language)
         if flow_outcome:
             return AgentResult(
@@ -334,9 +425,11 @@ class Orchestrator:
                 used_tool=None,
                 tool_data=None,
                 flow_state=flow_outcome.flow_state,
+                chat_ended=flow_outcome.intent in {"assist_sendoff", "sendoff"},
             )
 
-        if not message.strip() or matches_intent(message, "no_more_help"):
+        intent = await self.intent_agent.classify(message, language)
+        if intent == "no_more_help":
             reply = get_message("assist_sendoff", language)
             return AgentResult(
                 reply=reply,
@@ -347,19 +440,7 @@ class Orchestrator:
                 flow_state=None,
                 chat_ended=True,
             )
-
-        if matches_intent(message, "claim_payment"):
-            tool_result = tool_claim_payment(language)
-            return AgentResult(
-                reply=tool_result.content,
-                language=language,
-                intent="claim_payment",
-                used_tool=tool_result.name,
-                tool_data=tool_result.data,
-                flow_state=None,
-            )
-
-        if matches_intent(message, "help_options"):
+        if intent == "help_options":
             reply = get_message("faq_can_do", language)
             return AgentResult(
                 reply=reply,
@@ -369,8 +450,6 @@ class Orchestrator:
                 tool_data=None,
                 flow_state=None,
             )
-
-        intent = await self.intent_agent.classify(message, language)
         tool_result = self.tool_agent.run(intent, message, language)
 
         if tool_result:
@@ -384,7 +463,7 @@ class Orchestrator:
                 chat_ended=(intent == "sendoff"),
             )
 
-        if intent == "chat":
+        if intent in {"chat", "faq"}:
             rag_answer = self.faq_agent.answer(message, language)
             if rag_answer:
                 rag_answer = apply_guardrails(rag_answer, language)
@@ -397,27 +476,13 @@ class Orchestrator:
                     flow_state=None,
                 )
 
-        system_prompt = None
-        prompt = select_prompt_for_language(prompts, session.system_prompt_id, language)
-        if prompt:
-            system_prompt = prompt.get("prompt")
-
-        messages = list(session.history) + [{"role": "user", "content": message}]
-        try:
-            reply = await self.chat_agent.respond(messages, system_prompt)
-        except LLMError:
-            reply = (
-                "LLM उपलब्ध नहीं है। कृपया कॉन्फ़िगरेशन जाँचें।"
-                if language == "hi"
-                else "LLM is unavailable. Please check the configuration."
-            )
-
-        reply = apply_guardrails(reply, language)
+        _ = prompts
         return AgentResult(
-            reply=reply,
+            reply=get_message("guardrail_scope", language),
             language=language,
-            intent=intent,
+            intent="guardrail_scope",
             used_tool=None,
             tool_data=None,
             flow_state=None,
+            chat_ended=False,
         )
